@@ -31,6 +31,7 @@ static int iDelay = 0; //1;
 #include "rom/ets_sys.h"
 #ifndef ARDUINO
 #include "driver/gpio.h"
+#include "driver/i2c.h"
 #include "esp_timer.h"
 
 // GPIO modes
@@ -274,7 +275,10 @@ int bbepI2CInit(uint8_t sda, uint8_t scl, int bb)
         Wire.setTimeout(100);
 #else
     i2c_config_t conf;
-    ESP_ERROR_CHECK(i2c_driver_delete());
+    esp_err_t delete_err = i2c_driver_delete(I2C_NUM_0);
+    if (delete_err != ESP_OK && delete_err != ESP_FAIL) {
+        ESP_ERROR_CHECK(delete_err);
+    }
     conf.mode = I2C_MODE_MASTER;
     conf.sda_io_num = sda;
     conf.scl_io_num = scl;
