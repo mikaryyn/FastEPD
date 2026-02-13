@@ -300,6 +300,7 @@ class FASTEPD
 extern "C" {
 #endif
 // put C functions here
+void bbepDeinitBus(void);
 #ifdef __cplusplus
 };
 #else

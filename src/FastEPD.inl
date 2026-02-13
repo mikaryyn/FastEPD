@@ -1533,6 +1533,22 @@ int bbepInitPanel(FASTEPDSTATE *pState, int iPanel, uint32_t u32Speed)
 } /* bbepInitPanel() */
 
 //
+// Public API to properly deinitialize the I80 bus and panel IO
+// This must be called after deInit() to release hardware resources
+//
+void bbepDeinitBus(void)
+{
+    if (io_handle) {
+        esp_lcd_panel_io_del(io_handle);
+        io_handle = NULL;
+    }
+    if (i80_bus) {
+        esp_lcd_del_i80_bus(i80_bus);
+        i80_bus = NULL;
+    }
+} /* bbepDeinitBus() */
+
+//
 // Allow the user to set up a custom grayscale matrix
 // The number of passes is determined by dividing the table size by 16
 //
