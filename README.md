@@ -12,6 +12,9 @@ Since writing several display libraries (OneBitDisplay, bb_spi_lcd, bb_epaper), 
 <b> What devices are currently supported?</b><br>
 At the moment, FastEPD supports the EPDiy V7 PCB, M5Stack PaperS3, LilyGo T5 S3 4.7 Pro, Inkplate 6PLUS and the Inkplate 5 gen 2. With the EPDiy V7 PCB, various 8 and 16-bit panels have been tested.<br>
 <br>
+<b>ESP-IDF note:</b><br>
+The ESP-IDF builds use the newer I2C “driver_ng” master API (`driver/i2c_master.h`), which requires ESP-IDF v5.x.<br>
+<br>
 Please read the Wiki for API details.
 
 If you find this code useful, please consider becoming a sponsor or sending a donation.
