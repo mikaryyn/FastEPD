@@ -205,16 +205,16 @@ void bbepFillScreen(FASTEPDSTATE *pState, uint8_t u8Color)
     int iPitch;
     if (pState->mode == BB_MODE_1BPP) {
         if (u8Color == BBEP_WHITE) u8Color = 0xff;
-        iPitch = (pState->width + 7) / 8;
+        iPitch = (pState->native_width + 7) / 8;
     } else if (pState->mode == BB_MODE_2BPP) {
-        iPitch = (pState->width + 3) / 4;
+        iPitch = (pState->native_width + 3) / 4;
         u8Color |= (u8Color << 2);
         u8Color |= (u8Color << 4);
     } else {
-        iPitch = (pState->width + 1) / 2;
+        iPitch = (pState->native_width + 1) / 2;
         u8Color |= (u8Color << 4);
     }
-    memset(pState->pCurrent, u8Color, iPitch * pState->height);
+    memset(pState->pCurrent, u8Color, iPitch * pState->native_height);
 } /* bbepFillScreen() */
 //
 // Draw a sprite of any size in any position
@@ -598,7 +598,7 @@ int bbepSetPixel4Clr(void *pb, int x, int y, unsigned char ucColor)
             break;
     }
     u8 = pBBEP->pCurrent[i];
-    u8 = (u8 & u8Mask) | ucColor;
+    u8 = (u8 & (uint8_t)~u8Mask) | ucColor;
     pBBEP->pCurrent[i] = u8;
     return BBEP_SUCCESS;
 } /* bbepSetPixel4Clr() */
@@ -2061,4 +2061,3 @@ int bbepSetMode(FASTEPDSTATE *pState, int iMode)
 } /* setMode() */
 
 #endif // __BB_EP_GFX__
-
