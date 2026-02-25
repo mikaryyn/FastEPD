@@ -1728,6 +1728,9 @@ int bbepSmoothUpdate(FASTEPDSTATE *pState, bool bKeepOn, uint8_t u8Color)
 
     if (bbepEinkPower(pState, 1) != BBEP_SUCCESS) return BBEP_IO_ERROR;
     bbepClear(pState, (u8Color == BBEP_WHITE) ? BB_CLEAR_LIGHTEN : BB_CLEAR_DARKEN, 5, NULL);
+    const int iRowLen = pState->native_width / 4; // 2 bits per pixel after LUT expansion
+    const int iPad = pState->panelDef.iLinePadding;
+    const int iStride = iRowLen + iPad; // keep padding bytes stable per in-flight DMA
     // The other update methods transition everything from white. In this case, we
     // need to allow the user to update from black also
     if (pState->mode == BB_MODE_1BPP) {
@@ -1761,26 +1764,133 @@ int bbepSmoothUpdate(FASTEPDSTATE *pState, bool bKeepOn, uint8_t u8Color)
         } // for i
         // Write N passes of the black data to the whole display
         for (pass = 0; pass < pState->iFullPasses; pass++) {
+            int iDMAOff = 0;
             bbepRowControl(pState, ROW_START);
             for (i = 0; i < pState->native_height; i++) {
                 s = &pState->pTemp[i * (pState->native_width / 4)];
                 // Send the data for the row
-                memcpy(pState->dma_buf, s, pState->native_width/4);
-                bbepWriteRow(pState, pState->dma_buf, (pState->native_width / 4), 0);
+                uint8_t *rowBuf = &pState->dma_buf[iDMAOff];
+                memcpy(rowBuf, s, iRowLen);
+                if (iPad) memset(&rowBuf[iRowLen], 0, iPad);
+                bbepWriteRow(pState, rowBuf, iRowLen, 0);
                 bbepRowControl(pState, ROW_STEP);
+                iDMAOff = (iDMAOff == 0) ? iStride : 0;
             }
             delayMicroseconds(230);
         } // for pass
+    } else if (pState->mode == BB_MODE_2BPP) {
+        // 4 gray levels (2-bpp). Similar to the full-update 2bpp path, but without flashing.
+        // Convert each packed 2-bpp byte (4 pixels) into packed 2-bit "push" codes (4 pixels).
+        uint8_t *s;
+        uint8_t *u8Gray2BW, *u8Gray2Gray;
+        int dy; // destination Y for flipped displays
+
+        // Create fast lookup tables to convert the pixels directly into pushes.
+        // Use u8Cache (global 1024 bytes) as scratch: 256 + 256 bytes.
+        u8Gray2BW = u8Cache;
+        u8Gray2Gray = &u8Cache[256];
+        for (i = 0; i < 256; i++) {
+            uint8_t ucB, ucW, uc = (uint8_t)i, ucBW = 0, ucGray = 0;
+            if (pState->iFlags & BB_PANEL_FLAG_MIRROR_X) {
+                ucB = 0x40;
+                ucW = 0x80;
+            } else {
+                ucB = 0x01;
+                ucW = 0x02;
+            }
+            for (n = 0; n < 4; n++) { // for each pixel
+                if (pState->iFlags & BB_PANEL_FLAG_MIRROR_X) {
+                    ucBW >>= 2;
+                    ucGray >>= 2;
+                } else {
+                    ucBW <<= 2;
+                    ucGray <<= 2;
+                }
+                switch (uc & 0xc0) {
+                    case 0x00: // black
+                        ucBW |= ucB;
+                        ucGray |= ucB;
+                        break;
+                    case 0x40: // dark gray
+                        ucBW |= ucB;
+                        ucGray |= ucW;
+                        break;
+                    case 0x80: // light gray
+                        ucBW |= ucW;
+                        ucGray |= ucB;
+                        break;
+                    case 0xc0: // white
+                        ucBW |= ucW;
+                        ucGray |= ucW;
+                        break;
+                }
+                uc <<= 2;
+            }
+            u8Gray2BW[i] = ucBW;
+            u8Gray2Gray[i] = ucGray;
+        }
+
+        // First passes push pixels toward black/white.
+        for (pass = 0; pass < 5; pass++) {
+            int iDMAOff = 0;
+            bbepRowControl(pState, ROW_START);
+            for (i = 0; i < pState->native_height; i++) {
+                dy = (pState->iFlags & BB_PANEL_FLAG_MIRROR_Y) ? pState->native_height - 1 - i : i;
+                uint8_t *d = &pState->dma_buf[iDMAOff];
+                if (pState->iFlags & BB_PANEL_FLAG_MIRROR_X) {
+                    s = &pState->pCurrent[(dy * iRowLen) + iRowLen - 1];
+                    for (n = 0; n < iRowLen; n++) {
+                        d[n] = u8Gray2BW[*s--];
+                    }
+                } else {
+                    s = &pState->pCurrent[dy * iRowLen];
+                    for (n = 0; n < iRowLen; n++) {
+                        d[n] = u8Gray2BW[*s++];
+                    }
+                }
+                if (iPad) memset(&d[iRowLen], 0, iPad);
+                bbepWriteRow(pState, d, iRowLen, (i != 0));
+                iDMAOff = (iDMAOff == 0) ? iStride : 0;
+            }
+            delayMicroseconds(230);
+        }
+
+        // Final pass pushes pixels toward intermediate grays.
+        for (pass = 0; pass < 1; pass++) {
+            int iDMAOff = 0;
+            bbepRowControl(pState, ROW_START);
+            for (i = 0; i < pState->native_height; i++) {
+                dy = (pState->iFlags & BB_PANEL_FLAG_MIRROR_Y) ? pState->native_height - 1 - i : i;
+                uint8_t *d = &pState->dma_buf[iDMAOff];
+                if (pState->iFlags & BB_PANEL_FLAG_MIRROR_X) {
+                    s = &pState->pCurrent[(dy * iRowLen) + iRowLen - 1];
+                    for (n = 0; n < iRowLen; n++) {
+                        d[n] = u8Gray2Gray[*s--];
+                    }
+                } else {
+                    s = &pState->pCurrent[dy * iRowLen];
+                    for (n = 0; n < iRowLen; n++) {
+                        d[n] = u8Gray2Gray[*s++];
+                    }
+                }
+                if (iPad) memset(&d[iRowLen], 0, iPad);
+                bbepWriteRow(pState, d, iRowLen, (i != 0));
+                iDMAOff = (iDMAOff == 0) ? iStride : 0;
+            }
+            delayMicroseconds(230);
+        }
     } else { // must be 4BPP mode
         int dy, iPasses = (pState->panelDef.iMatrixSize / 16); // number of passes
-        uint8_t u8Invert = (u8Color = BBEP_WHITE) ? 0x00 : 0xff;
+        uint8_t u8Invert = (u8Color == BBEP_WHITE) ? 0x00 : 0xff;
         for (pass = 0; pass < iPasses; pass++) { // number of passes to make 16 unique gray levels
-            uint8_t *s, *d = pState->dma_buf;
+            int iDMAOff = 0;
+            uint8_t *s;
             uint8_t *pGrayU, *pGrayL;
             pGrayU = pGrayUpper + (pass * 256);
             pGrayL = pGrayLower + (pass * 256);
             bbepRowControl(pState, ROW_START);
             for (i = 0; i < pState->native_height; i++) {
+                uint8_t *d = &pState->dma_buf[iDMAOff];
                 dy = (pState->iFlags & BB_PANEL_FLAG_MIRROR_Y) ? pState->native_height - 1 - i : i;
                 s = &pState->pCurrent[dy * (pState->native_width / 2)];
                 if (pState->iFlags & BB_PANEL_FLAG_MIRROR_X) {
@@ -1802,8 +1912,10 @@ int bbepSmoothUpdate(FASTEPDSTATE *pState, bool bKeepOn, uint8_t u8Color)
                     } // for n
                     //  vTaskDelay(0);
                 }
-                bbepWriteRow(pState, pState->dma_buf, (pState->native_width / 4), 0);
+                if (iPad) memset(&d[iRowLen], 0, iPad);
+                bbepWriteRow(pState, d, iRowLen, 0);
                 bbepRowControl(pState, ROW_STEP);
+                iDMAOff = (iDMAOff == 0) ? iStride : 0;
             } // for i
             delayMicroseconds(230);
         } // for pass
