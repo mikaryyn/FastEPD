@@ -1779,8 +1779,9 @@ int bbepSmoothUpdate(FASTEPDSTATE *pState, bool bKeepOn, uint8_t u8Color)
                 uint8_t *rowBuf = &pState->dma_buf[iDMAOff];
                 memcpy(rowBuf, s, iRowLen);
                 if (iPad) memset(&rowBuf[iRowLen], 0, iPad);
-                bbepWriteRow(pState, rowBuf, iRowLen, 0);
-                bbepRowControl(pState, ROW_STEP);
+                // Row stepping must be synchronized with the end of the previous DMA transfer.
+                // bbepWriteRow() waits for DMA completion before optionally stepping to the next row.
+                bbepWriteRow(pState, rowBuf, iRowLen, (i != 0));
                 iDMAOff = (iDMAOff == 0) ? iStride : 0;
             }
             delayMicroseconds(230);
@@ -1920,8 +1921,8 @@ int bbepSmoothUpdate(FASTEPDSTATE *pState, bool bKeepOn, uint8_t u8Color)
                     //  vTaskDelay(0);
                 }
                 if (iPad) memset(&d[iRowLen], 0, iPad);
-                bbepWriteRow(pState, d, iRowLen, 0);
-                bbepRowControl(pState, ROW_STEP);
+                // Keep row stepping synchronized with DMA completion (see comment above).
+                bbepWriteRow(pState, d, iRowLen, (i != 0));
                 iDMAOff = (iDMAOff == 0) ? iStride : 0;
             } // for i
             delayMicroseconds(230);
