@@ -1674,6 +1674,9 @@ void bbepClear(FASTEPDSTATE *pState, uint8_t val, uint8_t count, BB_RECT *pRect)
     else if (val == BB_CLEAR_DARKEN) val = 0x55;
     else if (val == BB_CLEAR_NEUTRAL) val = 0x00;
     else val = 0xff; // skip
+    const int iRowLen = pState->native_width / 4;
+    const int iPad = pState->panelDef.iLinePadding;
+    const int iStride = iRowLen + iPad;
 
     if (pRect) {
         if (bbepFixRect(pState, pRect, &iStartCol, &iEndCol, &iStartRow, &iEndRow)) return;
@@ -1699,17 +1702,21 @@ void bbepClear(FASTEPDSTATE *pState, uint8_t val, uint8_t count, BB_RECT *pRect)
         u8Cache[i-1] = u8;
     }
     for (k = 0; k < count; k++) {
+        int iDMAOff = 0;
         bbepRowControl(pState, ROW_START);
         for (i = 0; i < pState->native_height; i++)
         {
             dy = (pState->iFlags & BB_PANEL_FLAG_MIRROR_Y) ? pState->native_height - 1 - i : i;
             // Send the data
+            uint8_t *rowBuf = &pState->dma_buf[iDMAOff];
             if (dy < iStartRow || dy > iEndRow) { // skip this row
-                memset(pState->dma_buf, 0xff, pState->native_width / 4);
+                memset(rowBuf, 0xff, iRowLen);
             } else { // mask the area we want to change
-                memcpy(pState->dma_buf, u8Cache, pState->native_width / 4);
+                memcpy(rowBuf, u8Cache, iRowLen);
             }
-            bbepWriteRow(pState, pState->dma_buf, pState->native_width / 4, (i!=0));
+            if (iPad) memset(&rowBuf[iRowLen], 0, iPad);
+            bbepWriteRow(pState, rowBuf, iRowLen, (i!=0));
+            iDMAOff = (iDMAOff == 0) ? iStride : 0;
             //bbepRowControl(pState, ROW_STEP);
         }
         delayMicroseconds(230);
