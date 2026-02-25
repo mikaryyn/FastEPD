@@ -16,17 +16,58 @@
 // found here: www.freetype.org
 //
 #include <ctype.h>
+#include <stdlib.h>
+#include <string.h>
 #include <ft2build.h>
 #include <stdint.h>
 #include <stdio.h>
 #include FT_GLYPH_H
 #include FT_MODULE_H
+#include FT_MULTIPLE_MASTERS_H
 #include FT_TRUETYPE_DRIVER_H
 #include "../src/g5enc.inl" // Group5 image compression library
 G5ENCIMAGE g5enc; // Group5 encoder state
 
 #define DPI 141 // Approximate resolution of common displays
 #define OUTBUF_SIZE 65536
+
+typedef struct {
+    char tag[5]; // 4-char OpenType axis tag + NUL
+    double value; // design coordinate in user units (e.g., wght=700)
+} AXIS_OVERRIDE;
+
+static int IsInt(const char *s)
+{
+    if (!s || !s[0]) return 0;
+    if (*s == '-' || *s == '+') s++;
+    if (!*s) return 0;
+    while (*s) {
+        if (*s < '0' || *s > '9') return 0;
+        s++;
+    }
+    return 1;
+} /* IsInt() */
+
+static FT_ULong TagFrom4Chars(const char tag[5])
+{
+    return FT_MAKE_TAG(tag[0], tag[1], tag[2], tag[3]);
+} /* TagFrom4Chars() */
+
+static void TagToString(FT_ULong tag, char out[5])
+{
+    out[0] = (char)((tag >> 24) & 0xff);
+    out[1] = (char)((tag >> 16) & 0xff);
+    out[2] = (char)((tag >> 8) & 0xff);
+    out[3] = (char)(tag & 0xff);
+    out[4] = 0;
+} /* TagToString() */
+
+static FT_Fixed DoubleToFixed16_16(double v)
+{
+    double scaled = v * 65536.0;
+    if (scaled >= 0.0) return (FT_Fixed)(scaled + 0.5);
+    return (FT_Fixed)(scaled - 0.5);
+} /* DoubleToFixed16_16() */
 //
 // Rotate a character 90/180/270 degrees
 //
@@ -158,6 +199,10 @@ int main(int argc, char *argv[])
     int iRotation = 0;
     uint8_t *pBitmap, *pTemp;
     FILE *fOut;
+    int numeric_vals[3];
+    int numeric_count = 0;
+    AXIS_OVERRIDE *pAxis = NULL;
+    int axis_count = 0;
     // TrueType library structures
     FT_Library library;
     FT_Face face;
@@ -174,7 +219,7 @@ int main(int argc, char *argv[])
     int bHFile; // flag indicating if the output will be a .H file of hex data
     
     if (argc < 4) {
-        printf("Usage: %s <in.ttf> <out.bbf or out.h> point_size [first_char] [last_char] [rotation (90/180/270)]\n", argv[0]);
+        printf("Usage: %s <in.ttf> <out.bbf or out.h> point_size [first_char] [last_char] [rotation (90/180/270)] [axis=value ...]\n", argv[0]);
         return 1;
     }
     size = atoi(argv[3]);
@@ -182,37 +227,83 @@ int main(int argc, char *argv[])
     pTemp = (uint8_t *)argv[2] + strlen(argv[2]) - 1;
     bHFile = (pTemp[0] == 'H' || pTemp[0] == 'h'); // output an H file?
 
-    if (argc == 5) {
-        last = atoi(argv[4]); // only ending character was provided
-    } else if (argc >= 6) {
-        first = atoi(argv[4]); // start + end character codes were provided
-        last = atoi(argv[5]);
-    }
-    if (argc == 7) { // rotation angle provided
-        iRotation = atoi(argv[6]);
-        if (iRotation != 90 && iRotation != 180 && iRotation != 270) {
-            printf("Rotation angle can only be 90/180/270\n");
+    if (argc > 4) {
+        pAxis = (AXIS_OVERRIDE *)malloc((argc - 4) * sizeof(AXIS_OVERRIDE));
+        if (!pAxis) {
+            printf("Error allocating memory for axis arguments\n");
             return 1;
         }
+        for (i = 4; i < argc; i++) {
+            char *eq = strchr(argv[i], '=');
+            if (eq) {
+                size_t klen = (size_t)(eq - argv[i]);
+                char *endp;
+                double v;
+                if (klen != 4) {
+                    printf("Invalid axis tag (must be 4 chars): %s\n", argv[i]);
+                    free(pAxis);
+                    return 1;
+                }
+                memcpy(pAxis[axis_count].tag, argv[i], 4);
+                pAxis[axis_count].tag[4] = 0;
+                v = strtod(eq + 1, &endp);
+                if (endp == (eq + 1) || (endp && *endp)) {
+                    printf("Invalid axis value: %s\n", argv[i]);
+                    free(pAxis);
+                    return 1;
+                }
+                pAxis[axis_count].value = v;
+                axis_count++;
+            } else if (IsInt(argv[i])) {
+                if (numeric_count >= 3) {
+                    printf("Too many numeric arguments. Expected at most: [first] [last] [rotation]\n");
+                    free(pAxis);
+                    return 1;
+                }
+                numeric_vals[numeric_count++] = atoi(argv[i]);
+            } else {
+                printf("Unrecognized argument: %s\n", argv[i]);
+                free(pAxis);
+                return 1;
+            }
+        }
+    }
+    if (numeric_count == 1) {
+        last = numeric_vals[0]; // only ending character was provided
+    } else if (numeric_count >= 2) {
+        first = numeric_vals[0]; // start + end character codes were provided
+        last = numeric_vals[1];
+    }
+    if (numeric_count == 3) {
+        iRotation = numeric_vals[2];
+    }
+    if (iRotation != 0 && iRotation != 90 && iRotation != 180 && iRotation != 270) {
+        printf("Rotation angle can only be 0/90/180/270\n");
+        if (pAxis) free(pAxis);
+        return 1;
     }
     if (last < first) {
         printf("Something went wrong - the starting character comes after the ending character. Try again...\n");
+        if (pAxis) free(pAxis);
         return 1;
     }
     if (first < 32 || first > 255 || last < 33 || last > 255) {
         printf("The character range must be between 32 and 255\n");
+        if (pAxis) free(pAxis);
         return 1;
     }
     if (bSmallFont) {
         pSmallGlyphs = (BB_GLYPH_SMALL *)malloc((last - first + 1) * sizeof(BB_GLYPH_SMALL));
         if (!pSmallGlyphs) {
             printf("Error allocating memory for glyph data\n");
+            if (pAxis) free(pAxis);
             return 1;
         }
     } else {
         pGlyphs = (BB_GLYPH *)malloc((last - first + 1) * sizeof(BB_GLYPH));
         if (!pGlyphs) {
             printf("Error allocating memory for glyph data\n");
+            if (pAxis) free(pAxis);
             return 1;
         }
     }
@@ -220,12 +311,14 @@ int main(int argc, char *argv[])
     pTemp = (uint8_t *)malloc(OUTBUF_SIZE); // for rotated bitmaps
     if (!pBitmap || ! pTemp) {
         printf("Error allocating memory for bitmap data\n");
+        if (pAxis) free(pAxis);
         return 1;
     }
     
     // Init FreeType lib, load font
     if ((err = FT_Init_FreeType(&library))) {
         printf("FreeType init error: %d", err);
+        if (pAxis) free(pAxis);
         return err;
     }
     // Print parameters
@@ -242,7 +335,70 @@ int main(int argc, char *argv[])
     if ((err = FT_New_Face(library, argv[1], 0, &face))) {
         printf("Font load error: %d\n", err);
         FT_Done_FreeType(library);
+        if (pAxis) free(pAxis);
         return err;
+    }
+
+    if (axis_count > 0) {
+        FT_MM_Var *mm = NULL;
+        FT_Fixed *coords;
+        FT_UInt a;
+        if ((err = FT_Get_MM_Var(face, &mm))) {
+            printf("Font does not support variable axes (or FreeType build lacks support). Error: %d\n", err);
+            FT_Done_FreeType(library);
+            if (pAxis) free(pAxis);
+            return err;
+        }
+        coords = (FT_Fixed *)malloc(mm->num_axis * sizeof(FT_Fixed));
+        if (!coords) {
+            printf("Error allocating memory for variation coordinates\n");
+            FT_Done_MM_Var(library, mm);
+            if (pAxis) free(pAxis);
+            return 1;
+        }
+        for (a = 0; a < mm->num_axis; a++) {
+            coords[a] = mm->axis[a].def;
+        }
+        for (i = 0; i < axis_count; i++) {
+            FT_ULong tag = TagFrom4Chars(pAxis[i].tag);
+            int found = 0;
+            for (a = 0; a < mm->num_axis; a++) {
+                if (mm->axis[a].tag == tag) {
+                    FT_Fixed v = DoubleToFixed16_16(pAxis[i].value);
+                    if (v < mm->axis[a].minimum) v = mm->axis[a].minimum;
+                    if (v > mm->axis[a].maximum) v = mm->axis[a].maximum;
+                    coords[a] = v;
+                    found = 1;
+                    break;
+                }
+            }
+            if (!found) {
+                char avail[5];
+                printf("Unknown axis tag '%s'. Available axes: ", pAxis[i].tag);
+                for (a = 0; a < mm->num_axis; a++) {
+                    TagToString(mm->axis[a].tag, avail);
+                    printf("%s%s", avail, (a + 1 < mm->num_axis) ? " " : "");
+                }
+                printf("\n");
+                free(coords);
+                FT_Done_MM_Var(library, mm);
+                if (pAxis) free(pAxis);
+                return 1;
+            }
+        }
+        err = FT_Set_Var_Design_Coordinates(face, mm->num_axis, coords);
+        free(coords);
+        FT_Done_MM_Var(library, mm);
+        if (err) {
+            printf("Error setting variation coordinates: %d\n", err);
+            FT_Done_FreeType(library);
+            if (pAxis) free(pAxis);
+            return err;
+        }
+    }
+    if (pAxis) {
+        free(pAxis);
+        pAxis = NULL;
     }
     
     // Shift the size left by 6 because the library uses '26dot6' fixed-point format
